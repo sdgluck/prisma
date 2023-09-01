@@ -2,7 +2,7 @@ import Debug from '@prisma/debug'
 import { getNodeAPIName, Platform } from '@prisma/get-platform'
 import findCacheDir from 'find-cache-dir'
 import fs from 'fs'
-import { ensureDir } from 'fs-extra'
+import { copy, ensureDir, pathExists, rm } from 'fs-extra'
 import os from 'os'
 import path from 'path'
 
@@ -10,16 +10,25 @@ import { BinaryType } from './BinaryType'
 
 const debug = Debug('prisma:fetch-engine:cache-dir')
 
-export async function getRootCacheDir(): Promise<string | null> {
-  if (os.platform() === 'win32') {
-    const cacheDir = findCacheDir({ name: 'prisma', create: true })
-    if (cacheDir) {
-      return cacheDir
+async function tryRestoreOldCache(cacheDir: string): Promise<void> {
+  // TODO: can restoration of old cache be moved someplace upstream?
+  try {
+    // On non-win32 cache files used to be stored at ~/.cache/prisma.
+    // If old cache exists move its contents to cacheDir.
+    const oldCachePath = path.join(os.homedir(), '.cache/prisma')
+    if (await pathExists(oldCachePath)) {
+      // Providing oldCachePath as the src means its _contents_ will be copied, not the directory itself.
+      // See: https://github.com/jprichardson/node-fs-extra/blob/cc7b3b22a984de5124131c7897574091c9df00e1/docs/copy.md
+      await copy(oldCachePath, cacheDir)
+      await rm(oldCachePath, { recursive: true, force: true, maxRetries: 1 })
     }
-    if (process.env.APPDATA) {
-      return path.join(process.env.APPDATA, 'Prisma')
-    }
+  } catch (e) {
+    debug('Failed to restore old cache to new dir:')
+    debug(e)
   }
+}
+
+export async function getRootCacheDir(): Promise<string | null> {
   // if this is lambda, nope
   if (process.env.AWS_LAMBDA_FUNCTION_VERSION) {
     try {
@@ -28,6 +37,14 @@ export async function getRootCacheDir(): Promise<string | null> {
     } catch (e) {
       return null
     }
+  }
+  const cacheDir = findCacheDir({ name: 'prisma', create: true })
+  if (cacheDir) {
+    await tryRestoreOldCache(cacheDir)
+    return cacheDir
+  }
+  if (os.platform() === 'win32' && process.env.APPDATA) {
+    return path.join(process.env.APPDATA, 'Prisma')
   }
   return path.join(os.homedir(), '.cache/prisma')
 }
